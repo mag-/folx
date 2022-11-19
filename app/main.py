@@ -3,21 +3,23 @@
 #   timestamp: 2022-11-18T14:46:49+00:00
 
 from __future__ import annotations
+
 import datetime
+import string
 import time
-
+import secrets
 from typing import Any, Dict, List, Optional, Union
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import HTMLResponse
 
-from fastapi import FastAPI, Form, Header
-from passlib.context import CryptContext
-from pydantic import BaseModel
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, Response, status
+from fastapi.responses import HTMLResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
-from app.extensions import OAuth2PasswordBearerWithCookie
+from passlib.context import CryptContext
+from pydantic import BaseModel
 
-from app.services import get_account, get_account_password
+from app.extensions import OAuth2PasswordBearerWithCookie
+from app.services import get_account, get_account_password, insert_account, save_oauth_client_data
+from starlette.responses import RedirectResponse
 
 from .models import (
     Account,
@@ -63,6 +65,7 @@ from .models import (
     Card,
     Context,
     Conversation,
+    CreateAccountForm,
     Emoji,
     Error,
     FeaturedTag,
@@ -146,7 +149,7 @@ def authenticate_user(fake_db, username: str, password: str):
 oauth2_scheme = OAuth2PasswordBearerWithCookie(tokenUrl="token")
 
 
-def create_access_token(data: dict, expires_delta: timedelta | None = None):
+def create_access_token(data: dict, expires_delta: datetime.timedelta | None = None):
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.datetime.utcnow() + expires_delta
@@ -555,9 +558,7 @@ def delete_api_v1_announcements_id_reactions_name(
 async def post_api_v1_apps(req: Request) -> Union[ApiV1AppsPostResponse, Error]:
     if req.headers["Content-Type"] == "application/json":
         r = ApiV1AppsPostRequest(**await req.json())
-    elif req.headers["Content-Type"] == "multipart/form-data":
-        r = ApiV1AppsPostRequest(**await req.form())
-    elif req.headers["Content-Type"] == "application/x-www-form-urlencoded":
+    else:
         r = ApiV1AppsPostRequest(**await req.form())
     print(r.client_name, r.redirect_uris, r.scopes, r.website)
     resp = ApiV1AppsPostResponse()
@@ -1417,7 +1418,13 @@ def get_oauth_authorize(
     redirect_uri: str = ...,
     scope: Optional[str] = None,
     force_login: Optional[bool] = None,
+    current_user: User = Depends(get_current_user),
 ) -> Union[None, Error]:
+    if not current_user:
+        return RedirectResponse(url="/login")
+    print(response_type, client_id, redirect_uri, scope)
+    client_secret = "".join((secrets.choice(string.ascii_letters) for i in range(20)))
+    save_oauth_client_data(client_id, client_secret, scope, current_user.acct)
     return HTMLResponse(f'<a href="{redirect_uri}?code=1">Authorize</a>')
 
 
@@ -1481,5 +1488,25 @@ def login_post(request: Request, response: Response, form_data: OAuth2PasswordRe
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     access_token = create_access_token({"acct": form_data.username})
     resp = templates.TemplateResponse("login.html", context={"request": request, "message": "Logged in successfully!"})
+    resp.set_cookie(key="access_token", value=f"Bearer {access_token}", httponly=True)
+    return resp
+
+
+@app.get("/create_account")
+def create_account_get(request: Request):
+    return templates.TemplateResponse("create_account.html", context={"request": request})
+
+
+@app.post("/create_account")
+def create_account_post(request: Request, response: Response, form_data: CreateAccountForm = Depends()):
+    hashed_password = get_account_password(form_data.username)
+    if hashed_password:
+        raise HTTPException(status_code=400, detail="Username already exists")
+    hashed_password = get_password_hash(form_data.password)
+    insert_account(Account(acct=form_data.username), password=hashed_password)
+    access_token = create_access_token({"acct": form_data.username})
+    resp = templates.TemplateResponse(
+        "create_account.html", context={"request": request, "message": "Account created successfully!"}
+    )
     resp.set_cookie(key="access_token", value=f"Bearer {access_token}", httponly=True)
     return resp
