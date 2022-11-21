@@ -9,6 +9,7 @@ import string
 import time
 import secrets
 from typing import Any, Dict, List, Optional, Union
+import uuid
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse
@@ -16,9 +17,18 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
+import pytz
 
 from app.extensions import OAuth2PasswordBearerWithCookie
-from app.services import get_account, get_account_password, insert_account, save_oauth_client_data
+from app.services import (
+    add_status,
+    check_client_id_code,
+    get_account,
+    get_account_password,
+    get_timeline,
+    insert_account,
+    save_oauth_client_data,
+)
 from starlette.responses import RedirectResponse
 
 from .models import (
@@ -74,6 +84,7 @@ from .models import (
     Instance,
     ListModel,
     Notification,
+    OauthTokenPostRequest,
     OauthTokenPostResponse,
     Order1,
     Poll,
@@ -82,6 +93,7 @@ from .models import (
     Relationship,
     Report,
     ScheduledStatus,
+    Source,
     Status,
     Tag,
     Type4,
@@ -254,11 +266,14 @@ def patch_api_v1_accounts_update_credentials() -> Union[Account, Error]:
 @app.get(
     "/api/v1/accounts/verify_credentials",
     response_model=Account,
+    response_model_exclude_none=True,
     responses={"401": {"model": Error}, "403": {"model": Error}},
 )
-def get_api_v1_accounts_verify_credentials(current_user: User = Depends(get_current_user)) -> Union[Account, Error]:
-    # Get current user using get_current_user from bearer token
-    print(current_user)
+def get_api_v1_accounts_verify_credentials(current_user: Account = Depends(get_current_user)) -> Union[Account, Error]:
+    if not current_user:
+        return Error("The access token is invalid", status_code=401)
+    if current_user.locked:
+        return Error("Your login is currently disabled", status_code=403)
     return current_user
 
 
@@ -268,7 +283,7 @@ def get_api_v1_accounts_verify_credentials(current_user: User = Depends(get_curr
     responses={"401": {"model": Error}, "404": {"model": Error}},
 )
 def get_api_v1_accounts_id(id: str) -> Union[Account, Error]:
-    pass
+    return get_account(id)
 
 
 @app.post(
@@ -384,7 +399,7 @@ def post_api_v1_accounts_id_pin(id: str) -> Union[Relationship, Error]:
     responses={"401": {"model": Error}, "404": {"model": Error}},
 )
 def get_api_v1_accounts_id_statuses(id: str) -> Union[List[Status], Error]:
-    pass
+    return []
 
 
 @app.post(
@@ -556,11 +571,13 @@ def delete_api_v1_announcements_id_reactions_name(
     responses={"422": {"model": Error}},
 )
 async def post_api_v1_apps(req: Request) -> Union[ApiV1AppsPostResponse, Error]:
-    if req.headers["Content-Type"] == "application/json":
+    if "application/json" in req.headers["content-type"]:
         r = ApiV1AppsPostRequest(**await req.json())
     else:
         r = ApiV1AppsPostRequest(**await req.form())
-    print(r.client_name, r.redirect_uris, r.scopes, r.website)
+    print(f"{r.client_name=} {r.redirect_uris=} {r.scopes=} {r.website=}")
+    # save client_id and secret in database
+
     resp = ApiV1AppsPostResponse()
     resp.id = "1"
     resp.name = r.client_name
@@ -569,12 +586,16 @@ async def post_api_v1_apps(req: Request) -> Union[ApiV1AppsPostResponse, Error]:
     resp.client_id = "1"
     resp.client_secret = "1"
     resp.vapid_key = "1"
+    if not resp.name:
+        resp.name = "unknown"
+    print(resp)
     return resp
 
 
 @app.get(
     "/api/v1/apps/verify_credentials",
     response_model=Application,
+    response_model_exclude_none=True,
     responses={"401": {"model": Error}},
 )
 def get_api_v1_apps_verify_credentials() -> Union[Application, Error]:
@@ -640,7 +661,7 @@ def post_api_v1_conversations_id_read(id: str) -> Union[Conversation, Error]:
 
 @app.get("/api/v1/custom_emojis", response_model=List[Emoji])
 def get_api_v1_custom_emojis() -> List[Emoji]:
-    pass
+    return []
 
 
 @app.get("/api/v1/directory", response_model=List[Account])
@@ -829,7 +850,7 @@ def post_api_v1_follow_requests_id_reject(id: str) -> Union[Relationship, Error]
 @app.get("/api/v1/instance", response_model=Instance)
 def get_api_v1_instance() -> Instance:
     i = Instance(
-        uri="https://folx.co",
+        uri="https://folx.co/",
         title="Folx",
         description="Folx is a social network for people who want to be heard.",
         short_description="Folx",
@@ -1165,13 +1186,33 @@ def delete_api_v1_scheduled_statuses_id(
 @app.post(
     "/api/v1/statuses",
     response_model=ApiV1StatusesPostResponse,
+    response_model_exclude_none=True,
     responses={"401": {"model": Error}},
 )
-def post_api_v1_statuses(
+async def post_api_v1_statuses(
     idempotency__key: Optional[str] = Header(None, alias="Idempotency-Key"),
-    body: List[ApiV1StatusesPostRequest] = None,
+    req: Request = None,
+    current_user: Account = Depends(get_current_user),
 ) -> Union[ApiV1StatusesPostResponse, Error]:
-    pass
+    if req.headers["Content-Type"] == "application/json":
+        r = ApiV1StatusesPostRequest(**await req.json())
+    else:
+        r = ApiV1StatusesPostRequest(**await req.form())
+    s = Status(
+        content=r.status,
+        language=r.language,
+        account=current_user,
+        visibility="public",
+        sensitive=False,
+        media_attachments=[],
+        mentions=[],
+        tags=[],
+        emojis=[],
+        spoiler_text="r.spoiler_text",
+    )
+    s = add_status(current_user.acct, s)
+    print(s)
+    return s
 
 
 @app.get(
@@ -1355,8 +1396,11 @@ def get_api_v1_timelines_list_list_id(
     max_id: Optional[str] = None,
     since_id: Optional[str] = None,
     min_id: Optional[str] = None,
+    current_user: Account = Depends(get_current_user),
 ) -> Union[List[Status], Error]:
-    pass
+    if not current_user:
+        return Error(error="Unauthorized")
+    return get_timeline(current_user.acct, limit=limit)
 
 
 @app.get("/api/v1/timelines/public", response_model=List[Status])
@@ -1369,7 +1413,7 @@ def get_api_v1_timelines_public(
     since_id: Optional[str] = None,
     min_id: Optional[str] = None,
 ) -> List[Status]:
-    pass
+    return []
 
 
 @app.get("/api/v1/timelines/tag/{hashtag}", response_model=List[Status])
@@ -1388,7 +1432,7 @@ def get_api_v1_timelines_tag_hashtag(
 
 @app.get("/api/v1/trends", response_model=List[Tag])
 def get_api_v1_trends(limit: Optional[int] = 10) -> List[Tag]:
-    pass
+    return []
 
 
 @app.get(
@@ -1418,14 +1462,14 @@ def get_oauth_authorize(
     redirect_uri: str = ...,
     scope: Optional[str] = None,
     force_login: Optional[bool] = None,
-    current_user: User = Depends(get_current_user),
+    current_user: Account = Depends(get_current_user),
 ) -> Union[None, Error]:
     if not current_user:
         return RedirectResponse(url="/login")
     print(response_type, client_id, redirect_uri, scope)
-    client_secret = "".join((secrets.choice(string.ascii_letters) for i in range(20)))
-    save_oauth_client_data(client_id, client_secret, scope, current_user.acct)
-    return HTMLResponse(f'<a href="{redirect_uri}?code=1">Authorize</a>')
+    code = "".join((secrets.choice(string.ascii_letters) for i in range(20)))
+    save_oauth_client_data(client_id, client_secret="", scope=scope, acct=current_user.acct, code=code)
+    return HTMLResponse(f'<a href="{redirect_uri}?code={code}">Authorize</a>')
 
 
 @app.post("/oauth/revoke", response_model=None, responses={"403": {"model": Error}})
@@ -1438,14 +1482,21 @@ def post_oauth_revoke() -> Union[None, Error]:
     response_model=OauthTokenPostResponse,
     responses={"400": {"model": Error}, "401": {"model": Error}},
 )
-def post_oauth_token() -> Union[OauthTokenPostResponse, Error]:
-    r = OauthTokenPostResponse(
-        access_token="1",
-        token_type="Bearer",
-        scope="read write follow",
-        created_at=int(time.time()),
-    )
-    return r
+def post_oauth_token(req: OauthTokenPostRequest) -> Union[OauthTokenPostResponse, Error]:
+    print(req)
+    acct = check_client_id_code(req.client_id, req.code)
+    print(acct)
+    if acct:
+        access_token = create_access_token({"acct": acct, "client_id": req.client_id})
+        r = OauthTokenPostResponse(
+            access_token=access_token,
+            token_type="bearer",
+            scope="read write follow",
+            created_at=int(time.time()),
+        )
+        print(r)
+        return r
+    return Error(error="invalid_client", error_description="Invalid client")
 
 
 from fastapi import WebSocket
@@ -1503,10 +1554,55 @@ def create_account_post(request: Request, response: Response, form_data: CreateA
     if hashed_password:
         raise HTTPException(status_code=400, detail="Username already exists")
     hashed_password = get_password_hash(form_data.password)
-    insert_account(Account(acct=form_data.username), password=hashed_password)
+    insert_account(
+        Account(
+            id=uuid.uuid1().int >> 64,
+            username=form_data.username,
+            acct=form_data.username,
+            display_name=form_data.username,
+            note="",
+            avatar="",
+            avatar_static="",
+            header="",
+            header_static="",
+            locked=False,
+            emojis=[],
+            discoverable=True,
+            created_at=datetime.datetime.utcnow().replace(tzinfo=pytz.utc),
+            followers_count=0,
+            following_count=0,
+            statuses_count=0,
+            fields=[],
+            bot=False,
+            suspended=False,
+            url=f"https://folx.co/@{form_data.username}",
+        ),
+        password=hashed_password,
+    )
     access_token = create_access_token({"acct": form_data.username})
     resp = templates.TemplateResponse(
         "create_account.html", context={"request": request, "message": "Account created successfully!"}
     )
     resp.set_cookie(key="access_token", value=f"Bearer {access_token}", httponly=True)
     return resp
+
+
+@app.get("/.well-known/webfinger")
+def webfinger(request: Request):
+    resource = request.query_params.get("resource")
+    if resource:
+        acct = resource.split(":")[1]
+        acct = acct.split("@")[0]
+        account = get_account(acct)
+        if account:
+            return {
+                "subject": resource,
+                "links": [
+                    {
+                        "rel": "self",
+                        "type": "application/activity+json",
+                        "href": f"https://folx.co/users/{acct}",
+                    }
+                ],
+            }
+    return Response(status_code=400)

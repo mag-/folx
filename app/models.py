@@ -436,9 +436,9 @@ class Token(BaseModel):
 
 
 class ApiV1AppsPostRequest(BaseModel):
-    client_name: str = Field(..., description="A name for your application")
-    redirect_uris: str = Field(
-        ...,
+    client_name: Optional[str] = Field(None, description="A name for your application")
+    redirect_uris: Optional[str] = Field(
+        None,
         description="Where the user should be redirected after authorization. To display the authorization code to the user instead of redirecting to a web page, use urn:ietf:wg:oauth:2.0:oob in this parameter.",
     )
     scopes: Optional[str] = Field(

@@ -26,3 +26,7 @@ Really we need a minimal javascript, just to refresh the timeline, rest can be b
 
 # ActivityPub
 Need a minimal implementation just so one can follow on external server and people can follow back.
+
+# Large partition consideration
+Current design will suffer once we get around 600,000 tweets per person or per timeline. These needs to bo solved by adding an addional key in all the tables to split partitions per day.
+
